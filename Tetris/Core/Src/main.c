@@ -10,13 +10,13 @@ ADC_HandleTypeDef hadc1;
 #define TOTAL_ROWS      16
 #define TOTAL_COLS      8
 
-// Sensitivity
-#define JOY_LOW         1000
-#define JOY_HIGH        3500
+// Sensitivity [mV]
+#define JOY_LOW         200
+#define JOY_HIGH        3800
 
-// Speeds (ms)
+// Speeds [ms]
 #define INPUT_DELAY     100
-uint32_t gravity_speed = 200;
+uint32_t gravity_speed = 400;
 
 /* --- 3. REGISTERS --- */
 #define REG_SHUTDOWN    0x0C
@@ -25,23 +25,34 @@ uint32_t gravity_speed = 200;
 #define REG_INTENSITY   0x0A
 #define REG_DISPLAY_TEST 0x0F
 
-/* --- 4. SHAPE DEFINITIONS (2D Array) --- */
+/* --- 4. SHAPE DEFINITIONS --- */
 #define NUM_SHAPES 7
-#define COORDS_PER_SHAPE 8 // 4 blocks * 2 (x,y)
+#define COORDS_PER_SHAPE 8
 
-// The Library of Shapes (Flat 2D Array)
-// Format: {x1, y1, x2, y2, x3, y3, x4, y4}
 const int8_t SHAPES[NUM_SHAPES][COORDS_PER_SHAPE] = {
-    {-1, 0,  0, 0,  1, 0,  2, 0}, // 0: I-Shape
-    {-1,-1, -1, 0,  0, 0,  1, 0}, // 1: J-Shape
-    {-1, 0,  0, 0,  1, 0,  1,-1}, // 2: L-Shape
-    { 0, 0,  1, 0,  0, 1,  1, 1}, // 3: O-Shape (Square)
-    {-1, 1,  0, 1,  0, 0,  1, 0}, // 4: S-Shape
-    { 0,-1, -1, 0,  0, 0,  1, 0}, // 5: T-Shape
-    {-1, 0,  0, 0,  0, 1,  1, 1}  // 6: Z-Shape
+    // I-Shape
+    {-1, 0,  0, 0,  1, 0,  2, 0},
+
+    // J-Shape
+    {-1,-1, -1, 0,  0, 0,  1, 0},
+
+    // L-Shape
+    {-1, 0,  0, 0,  1, 0,  1,-1},
+
+    // O-Shape
+	{0, 0,  1, 0,  0, 1,  1, 1},
+
+    // S-Shape
+    {-1, 1,  0, 1,  0, 0,  1, 0},
+
+    // T-Shape
+    { 0,-1, -1, 0,  0, 0,  1, 0},
+
+    // Z-Shape
+    {-1, 0,  0, 0,  0, 1,  1, 1}
 };
 
-/* --- 5. FSM STATES --- */
+/* --- 5. STATES --- */
 typedef enum {
     STATE_INIT,
     STATE_SPAWN,
@@ -50,12 +61,14 @@ typedef enum {
     STATE_STOPPED
 } GameState_t;
 
-/* --- 6. GLOBAL VARIABLES --- */
+/* --- 6. GLOBALS --- */
 uint8_t display_buffer[TOTAL_ROWS];
 uint8_t locked_buffer[TOTAL_ROWS];
 
-int8_t cursor_x = 0;
-int8_t cursor_y = 0;
+int8_t pivot_x = 0;
+int8_t pivot_y = 0;
+int8_t active_shape_coords[COORDS_PER_SHAPE];
+uint8_t current_shape_id = 3;
 
 GameState_t current_state = STATE_INIT;
 
@@ -71,12 +84,18 @@ static void MX_ADC1_Init(void);
 void Screen_Init(void);
 void MAX7219_Flush(void);
 void MAX7219_SetPixel(uint8_t* buffer, int8_t x, int8_t y, uint8_t state);
-uint8_t MAX7219_GetPixel(uint8_t* buffer, int8_t x, int8_t y); // New Helper
+uint8_t MAX7219_GetPixel(uint8_t* buffer, int8_t x, int8_t y);
 void MAX7219_Clear(uint8_t* buffer);
 uint32_t Read_ADC_Channel(uint32_t channel);
+uint8_t Check_Pixel_Collision(int8_t x, int8_t y);
+void Check_Full_Rows(void);
 
-uint8_t Check_Collision(int8_t x, int8_t y);
-void Check_Full_Rows(void); // New Logic
+// Drivers
+void Tetromino_Spawn(uint8_t shape_id);
+uint8_t Tetromino_CheckCollision(int8_t target_pivot_x, int8_t target_pivot_y);
+void Tetromino_Lock(void);
+void Tetromino_Draw(uint8_t* buffer);
+int8_t Wrap_Coordinate(int8_t x);
 
 /* --- 8. MAIN LOOP --- */
 int main(void)
@@ -104,10 +123,10 @@ int main(void)
               break;
 
           case STATE_SPAWN:
-              cursor_x = 3;
-              cursor_y = 0;
-              if (Check_Collision(cursor_x, cursor_y)) {
-                  MAX7219_Clear(locked_buffer); // Game Over -> Reset
+              Tetromino_Spawn(3); // Spawn O-Shape
+
+              if (Tetromino_CheckCollision(pivot_x, pivot_y)) {
+                  MAX7219_Clear(locked_buffer);
               }
               last_gravity_time = HAL_GetTick();
               current_state = STATE_PLAYING;
@@ -117,38 +136,43 @@ int main(void)
           {
               uint32_t now = HAL_GetTick();
 
-              // GRAVITY
+              // --- GRAVITY ---
               if (now - last_gravity_time > gravity_speed) {
-                  int8_t next_y = cursor_y + 1;
-                  if (!Check_Collision(cursor_x, next_y)) {
-                      cursor_y = next_y;
+                  if (!Tetromino_CheckCollision(pivot_x, pivot_y + 1)) {
+                      pivot_y++;
                   }
                   else {
-                      // Lock Piece
-                      MAX7219_SetPixel(locked_buffer, cursor_x, cursor_y, 1);
-                      // Go Check for Full Lines
+                      Tetromino_Lock();
                       current_state = STATE_CHECK_LINES;
                   }
                   last_gravity_time = now;
               }
 
-              // INPUT
+              // --- INPUT ---
               if (now - last_input_time > INPUT_DELAY && current_state == STATE_PLAYING) {
                   uint32_t val_x = Read_ADC_Channel(ADC_CHANNEL_1);
                   uint32_t val_y = Read_ADC_Channel(ADC_CHANNEL_2);
 
-                  int8_t next_x = cursor_x;
+                  int8_t next_x = pivot_x;
+
+                  // Joystick
                   if (val_x < JOY_LOW) next_x--;
                   else if (val_x > JOY_HIGH) next_x++;
 
+                  // WRAP THE PIVOT (Standard Pacman)
                   if(next_x < 0) next_x = TOTAL_COLS - 1;
                   if(next_x >= TOTAL_COLS) next_x = 0;
 
-                  if (!Check_Collision(next_x, cursor_y)) cursor_x = next_x;
+                  // Collision Check
+                  if (!Tetromino_CheckCollision(next_x, pivot_y)) {
+                      pivot_x = next_x;
+                  }
 
                   // Manual Drop
                   if (val_y > JOY_HIGH) {
-                      if (!Check_Collision(cursor_x, cursor_y + 1)) cursor_y++;
+                      if (!Tetromino_CheckCollision(pivot_x, pivot_y + 1)) {
+                          pivot_y++;
+                      }
                   }
 
                   if (HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_3) == GPIO_PIN_RESET) {
@@ -157,17 +181,16 @@ int main(void)
                   last_input_time = now;
               }
 
-              // RENDER
+              // --- RENDER ---
               memcpy(display_buffer, locked_buffer, sizeof(locked_buffer));
-              MAX7219_SetPixel(display_buffer, cursor_x, cursor_y, 1);
+              Tetromino_Draw(display_buffer);
               MAX7219_Flush();
               break;
           }
 
-          /* --- NEW STATE: HANDLE LINE CLEARING --- */
           case STATE_CHECK_LINES:
-              Check_Full_Rows(); // Run the logic
-              current_state = STATE_SPAWN; // Then spawn new dot
+              Check_Full_Rows();
+              current_state = STATE_SPAWN;
               break;
 
           case STATE_STOPPED:
@@ -178,123 +201,113 @@ int main(void)
   }
 }
 
-/* --- 9. LOGIC FUNCTIONS --- */
+/* --- 9. HELPERS --- */
 
-/**
- * @brief Scans the locked_buffer for full rows and clears them.
- */
+// X AXIS RING WRAPPING
+int8_t Wrap_Coordinate(int8_t x) {
+    // (x % 8 + 8) % 8
+	// x = -1 -> x = 7
+    return (x % TOTAL_COLS + TOTAL_COLS) % TOTAL_COLS;
+}
+
+void Tetromino_Spawn(uint8_t shape_id) {
+    if (shape_id >= NUM_SHAPES) shape_id = 0;
+    memcpy(active_shape_coords, SHAPES[shape_id], COORDS_PER_SHAPE);
+    pivot_x = 3;
+    pivot_y = 0;
+    current_shape_id = shape_id;
+}
+
+uint8_t Tetromino_CheckCollision(int8_t target_pivot_x, int8_t target_pivot_y) {
+    for (int i = 0; i < 4; i++) {
+        int8_t raw_x = target_pivot_x + active_shape_coords[i*2];
+        int8_t block_y = target_pivot_y + active_shape_coords[i*2 + 1];
+        int8_t block_x = Wrap_Coordinate(raw_x);
+
+        if (Check_Pixel_Collision(block_x, block_y)) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+void Tetromino_Lock(void) {
+    for (int i = 0; i < 4; i++) {
+        int8_t raw_x = pivot_x + active_shape_coords[i*2];
+        int8_t block_y = pivot_y + active_shape_coords[i*2 + 1];
+        int8_t block_x = Wrap_Coordinate(raw_x);
+
+        MAX7219_SetPixel(locked_buffer, block_x, block_y, 1);
+    }
+}
+
+void Tetromino_Draw(uint8_t* buffer) {
+    for (int i = 0; i < 4; i++) {
+        int8_t raw_x = pivot_x + active_shape_coords[i*2];
+        int8_t block_y = pivot_y + active_shape_coords[i*2 + 1];
+        int8_t block_x = Wrap_Coordinate(raw_x);
+
+        MAX7219_SetPixel(buffer, block_x, block_y, 1);
+    }
+}
+
+/* --- LOW LEVEL --- */
+uint8_t Check_Pixel_Collision(int8_t x, int8_t y) {
+    if (y >= TOTAL_ROWS) return 1; // Floor
+    if (MAX7219_GetPixel(locked_buffer, x, y)) return 1; // Pile
+    return 0;
+}
+
 void Check_Full_Rows(void) {
-    // We scan from Bottom (15) to Top (0)
     for (int y = TOTAL_ROWS - 1; y >= 0; y--) {
-
-        // 1. Check if Row 'y' is full
         uint8_t is_full = 1;
         for (int x = 0; x < TOTAL_COLS; x++) {
             if (MAX7219_GetPixel(locked_buffer, x, y) == 0) {
-                is_full = 0; // Found an empty spot
+                is_full = 0;
                 break;
             }
         }
-
-        // 2. If Full -> Clear and Shift Everything Down
         if (is_full) {
-            // Shift Logic:
-            // For every row starting at 'y' (the full one),
-            // copy the content of the row ABOVE it ('k-1') into it ('k').
             for (int k = y; k > 0; k--) {
                 for (int x = 0; x < TOTAL_COLS; x++) {
                     uint8_t pixel_above = MAX7219_GetPixel(locked_buffer, x, k - 1);
                     MAX7219_SetPixel(locked_buffer, x, k, pixel_above);
                 }
             }
-
-            // Clear the very top row (Row 0) because it has nothing above it
-            for (int x = 0; x < TOTAL_COLS; x++) {
-                MAX7219_SetPixel(locked_buffer, x, 0, 0);
-            }
-
-            // IMPORTANT:
-            // Since we shifted everything down, the current row index 'y'
-            // now contains the data that used to be at 'y-1'.
-            // We must check this index AGAIN to see if that new line is also full.
+            for (int x = 0; x < TOTAL_COLS; x++) MAX7219_SetPixel(locked_buffer, x, 0, 0);
             y++;
         }
     }
 }
 
-uint8_t Check_Collision(int8_t x, int8_t y) {
-    if (y >= TOTAL_ROWS) return 1; // Floor
-
-    // Check Pile
-    if (MAX7219_GetPixel(locked_buffer, x, y)) return 1;
-
-    return 0;
-}
-
-/* --- 10. BUFFER HELPERS --- */
-
-/** * @brief Reads the state (1/0) of a pixel from memory.
- * This function reverses the logic of SetPixel to find the data.
- */
 uint8_t MAX7219_GetPixel(uint8_t* buffer, int8_t x, int8_t y) {
     if (x < 0 || x >= TOTAL_COLS || y < 0 || y >= TOTAL_ROWS) return 0;
-
-    uint8_t module_offset;
-    int8_t local_y;
-
-    if (y < 8) {
-        module_offset = 8;
-        local_y = y;
-    } else {
-        module_offset = 0;
-        local_y = y - 8;
-    }
-
-    uint8_t target_index = module_offset + x;
-    uint8_t bit_mask = (1 << local_y);
-
-    return (buffer[target_index] & bit_mask) ? 1 : 0;
+    uint8_t module_offset = (y < 8) ? 8 : 0;
+    int8_t local_y = (y < 8) ? y : y - 8;
+    return (buffer[module_offset + x] & (1 << local_y)) ? 1 : 0;
 }
 
 void MAX7219_SetPixel(uint8_t* buffer, int8_t x, int8_t y, uint8_t state) {
     if (x < 0 || x >= TOTAL_COLS || y < 0 || y >= TOTAL_ROWS) return;
-
-    uint8_t module_offset;
-    int8_t local_y;
-
-    if (y < 8) {
-        module_offset = 8;
-        local_y = y;
-    } else {
-        module_offset = 0;
-        local_y = y - 8;
-    }
-
-    uint8_t target_index = module_offset + x;
-    uint8_t bit_mask = (1 << local_y);
-
-    if (state) buffer[target_index] |= bit_mask;
-    else       buffer[target_index] &= ~bit_mask;
+    uint8_t module_offset = (y < 8) ? 8 : 0;
+    int8_t local_y = (y < 8) ? y : y - 8;
+    if (state) buffer[module_offset + x] |= (1 << local_y);
+    else       buffer[module_offset + x] &= ~(1 << local_y);
 }
 
 void MAX7219_Flush(void) {
     for (uint8_t i = 0; i < 8; i++) {
         uint8_t addr = i + 1;
         HAL_GPIO_WritePin(GPIOA, GPIO_PIN_4, GPIO_PIN_RESET);
-
         HAL_SPI_Transmit(&hspi1, &addr, 1, 10);
         HAL_SPI_Transmit(&hspi1, &display_buffer[8 + i], 1, 10);
-
         HAL_SPI_Transmit(&hspi1, &addr, 1, 10);
         HAL_SPI_Transmit(&hspi1, &display_buffer[i], 1, 10);
-
         HAL_GPIO_WritePin(GPIOA, GPIO_PIN_4, GPIO_PIN_SET);
     }
 }
 
-void MAX7219_Clear(uint8_t* buffer) {
-    memset(buffer, 0, TOTAL_ROWS);
-}
+void MAX7219_Clear(uint8_t* buffer) { memset(buffer, 0, TOTAL_ROWS); }
 
 void Screen_Init(void) {
     uint8_t commands[][2] = {
@@ -328,7 +341,7 @@ uint32_t Read_ADC_Channel(uint32_t channel) {
     return 2048;
 }
 
-/* --- 11. HARDWARE INIT --- */
+/* --- HARDWARE INIT --- */
 void SystemClock_Config(void) {
   RCC_OscInitTypeDef RCC_OscInitStruct = {0};
   RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};

@@ -1,5 +1,6 @@
 #include "main.h"
 #include <string.h>
+#include <stdlib.h>
 
 /* --- 1. HARDWARE HANDLES --- */
 SPI_HandleTypeDef hspi1;
@@ -31,25 +32,25 @@ uint32_t gravity_speed = 400;
 
 const int8_t SHAPES[NUM_SHAPES][COORDS_PER_SHAPE] = {
     // I-Shape
-    {-1, 0,  0, 0,  1, 0,  2, 0},
+    {-1, 0,   0, 0,   1, 0,   2, 0},
 
     // J-Shape
-    {-1,-1, -1, 0,  0, 0,  1, 0},
+    {-1,-1,  -1, 0,   0, 0,   1, 0},
 
     // L-Shape
-    {-1, 0,  0, 0,  1, 0,  1,-1},
+    {-1, 0,   0, 0,   1, 0,   1,-1},
 
     // O-Shape
-	{0, 0,  1, 0,  0, 1,  1, 1},
+	{ 0, 0,   1, 0,   0, 1,   1, 1},
 
     // S-Shape
-    {-1, 1,  0, 1,  0, 0,  1, 0},
+    {-1, 1,   0, 1,   0, 0,   1, 0},
 
     // T-Shape
-    { 0,-1, -1, 0,  0, 0,  1, 0},
+    { 0,-1,  -1, 0,   0, 0,   1, 0},
 
     // Z-Shape
-    {-1, 0,  0, 0,  0, 1,  1, 1}
+    {-1, 0,   0, 0,   0, 1,   1, 1}
 };
 
 /* --- 5. STATES --- */
@@ -119,11 +120,14 @@ int main(void)
               Screen_Init();
               MAX7219_Clear(locked_buffer);
               MAX7219_Clear(display_buffer);
+
+              srand(HAL_GetTick() + Read_ADC_Channel(ADC_CHANNEL_1));
+
               current_state = STATE_SPAWN;
               break;
 
           case STATE_SPAWN:
-              Tetromino_Spawn(3); // Spawn O-Shape
+        	  Tetromino_Spawn(rand() % NUM_SHAPES);
 
               if (Tetromino_CheckCollision(pivot_x, pivot_y)) {
                   MAX7219_Clear(locked_buffer);
@@ -159,7 +163,7 @@ int main(void)
                   if (val_x < JOY_LOW) next_x--;
                   else if (val_x > JOY_HIGH) next_x++;
 
-                  // WRAP THE PIVOT (Standard Pacman)
+                  // WRAP THE PIVOT
                   if(next_x < 0) next_x = TOTAL_COLS - 1;
                   if(next_x >= TOTAL_COLS) next_x = 0;
 

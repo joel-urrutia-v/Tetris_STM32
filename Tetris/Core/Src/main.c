@@ -27,7 +27,7 @@ typedef enum {
     STATE_INIT,
     STATE_SPAWN,
     STATE_PLAYING,
-//	  STATE_STATS,
+	STATE_STATS,
     STATE_STOPPED,
     STATE_GAMEOVER
 } GameState_t;
@@ -35,20 +35,22 @@ typedef enum {
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
+
+// PLAYER CONTROLLERS (JoyStick and Buttons)
+#define BTN_PORT        GPIOA
+#define BTN_ANTIROT_PIN GPIO_PIN_0    // PA0 (Blue Button)
+#define BTN_ROT_PIN     GPIO_PIN_4    // PA4 (Black Button)
+#define BTN_RESET_PIN   GPIO_PIN_3    // PA3 (JoyStick Center)
+#define JS_RX_CHANNEL   ADC_CHANNEL_1 // PA1
+#define JS_RY_CHANNEL   ADC_CHANNEL_2 // PA2
+
 // MAX7219 LED MATRIX
 #define MTX_PORT     GPIOA
 #define MTX_CS_PIN   GPIO_PIN_6  // Chip Select (Load)
 
-// JOYSTICK and INPUTS
-#define JS_RX_CHANNEL   ADC_CHANNEL_1 // PA1
-#define JS_RY_CHANNEL   ADC_CHANNEL_2 // PA2
-#define BTN_ANTIROT_PIN GPIO_PIN_3    // PA3 (Anti-clockwise Rotation)
-#define BTN_STOP_PIN    GPIO_PIN_0    // PA0 (Stop/Reset)
-#define BTN_PORT        GPIOA
-
 // AUDIO
 #define AUDIO_RESET_PORT GPIOD
-#define AUDIO_RESET_PIN  GPIO_PIN_4   // PD4
+#define AUDIO_RESET_PIN  GPIO_PIN_4   // PD4 (3.5mm Mini-Jack Port)
 
 // LCD
 #define LCD_PORT   GPIOE
@@ -241,7 +243,7 @@ void Tetromino_Spawn(uint8_t shape_id);
 uint8_t Tetromino_CheckCollision(int8_t target_pivot_x, int8_t target_pivot_y);
 void Tetromino_Lock(void);
 void Tetromino_Draw(uint8_t* buffer);
-void Tetromino_Rotate(void);
+void Tetromino_Rotate(int8_t direction); // +1 for CW, -1 for CCW
 
 // LCD Display Functions
 void LCD_Init(void);
@@ -299,36 +301,41 @@ int main(void)
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   while (1)
-  {
-	  // Global Emergency Stop Check
-	  if (current_state != STATE_STOPPED && HAL_GPIO_ReadPin(GPIOA, BTN_STOP_PIN) == GPIO_PIN_SET) {
-		  current_state = STATE_STOPPED;
-	      // Debounce wait
-	      uint32_t stop_entry = HAL_GetTick();
-	      while((HAL_GetTick() - stop_entry) < 200);
-	  }
+    {
+  	  // Emergency Stop Check (STM Blue and Black buttons pressed together)
+  	  if (current_state != STATE_STOPPED && HAL_GPIO_ReadPin(BTN_PORT, BTN_ANTIROT_PIN) == GPIO_PIN_SET && HAL_GPIO_ReadPin(BTN_PORT, BTN_ROT_PIN) == GPIO_PIN_SET) {
+  		  current_state = STATE_STOPPED;
+  	      uint32_t stop_entry = HAL_GetTick();
+  	      while((HAL_GetTick() - stop_entry) < 500); // Long debounce for safety
+  	  }
       switch (current_state)
       {
           case STATE_INIT:
               Screen_Init();
               Audio_Init();
-              Audio_Beep(350);
+              LCD_Init();
 
               MAX7219_Clear(locked_buffer);
               MAX7219_Clear(display_buffer);
 
-              // Seed random with ADC noise
+              LCD_LoadCustomChars();
+              // Seed random with extra ADC noise, more noisy more random
               srand(HAL_GetTick() + Read_ADC_Channel(JS_RX_CHANNEL));
 
               game_score = 0;
               game_level = 1;
               lines_cleared = 0;
               gravity_speed = 500;
+              next_shape_id = rand() % NUM_SHAPES;
+
+              Audio_Beep(350);
+              LCD_UpdateStats();
+
               current_state = STATE_SPAWN;
               break;
 
           case STATE_SPAWN:
-              Tetromino_Spawn(rand() % NUM_SHAPES);
+              Tetromino_Spawn(next_shape_id);
 
               if (Tetromino_CheckCollision(pivot_x, pivot_y)) {
             	  Audio_Beep(350);
@@ -353,22 +360,7 @@ int main(void)
                 	  Tetromino_Lock();
                 	  Audio_Beep(100);
 
-                	  // Line Check Logic ---
-                	  uint8_t cleared_lines = Check_Full_Rows();
-
-                	  if (cleared_lines > 0) {
-                		  // Scoring Logic
-                		  game_score += (cleared_lines * FULLROW_POINTS * game_level);
-                		  lines_cleared += cleared_lines;
-
-                		  // Level Up Logic
-                		  if (lines_cleared >= (game_level * LNS_CLR_NXT_LVL)) {
-                			  game_level++;
-                			  if (gravity_speed > 100) gravity_speed -= 50;
-                		  }
-                		  Audio_Beep(350);
-                	  }
-                  current_state = STATE_SPAWN;
+                	  current_state = STATE_STATS;
                   }
             	  last_gravity_time = now;
               }
@@ -396,15 +388,26 @@ int main(void)
                       }
                   }
 
-                  // Rotation (PA3)
-                  static uint8_t rot_pressed = 0;
-                  if (HAL_GPIO_ReadPin(GPIOA, BTN_ANTIROT_PIN) == GPIO_PIN_RESET) {
-                      if (rot_pressed == 0) {
-                          Tetromino_Rotate();
-                          rot_pressed = 1;
-                      }
+                  // Anti-Clockwise Rotation
+                  static uint8_t antirot_pressed = 0;
+                  if (HAL_GPIO_ReadPin(BTN_PORT, BTN_ANTIROT_PIN) == GPIO_PIN_SET) {
+                	  if (antirot_pressed == 0) {
+                		  Tetromino_Rotate(-1); // CCW
+                          antirot_pressed = 1;
+                	  }
                   } else {
-                      rot_pressed = 0;
+                	  antirot_pressed = 0;
+                  }
+
+                  // Clockwise Rotation
+                  static uint8_t rot_pressed = 0;
+                  if (HAL_GPIO_ReadPin(BTN_PORT, BTN_ROT_PIN) == GPIO_PIN_SET) {
+                	  if (rot_pressed == 0) {
+                		  Tetromino_Rotate(1); // CW
+                          rot_pressed = 1;
+                	  }
+                  } else {
+                	  rot_pressed = 0;
                   }
                   last_input_time = now;
               }
@@ -416,24 +419,42 @@ int main(void)
               break;
           }
 
+          case STATE_STATS:
+          {
+        	  uint8_t cleared_lines = Check_Full_Rows();
+        	  if (cleared_lines > 0) {
+        		  game_score += (cleared_lines * FULLROW_POINTS * game_level);
+        		  lines_cleared += cleared_lines;
+
+        		  // Level Up Logic
+                  if (lines_cleared >= (game_level * LNS_CLR_NXT_LVL)) {
+                	  game_level++;
+                	  if (gravity_speed > 100) gravity_speed -= 50;
+                  }
+                  Audio_Beep(350);
+        	  }
+              // We update the 'next_shape_id' variable which LCD_UpdateStats reads
+              next_shape_id = rand() % NUM_SHAPES;
+              // Update the LCD with the new score, level and next shape
+              LCD_UpdateStats();
+
+              current_state = STATE_SPAWN;
+              break;
+          }
+
           case STATE_STOPPED:
-              // Clears the display
+        	  // Clears the display
         	  MAX7219_Clear(display_buffer);
-              MAX7219_Flush();
+        	  MAX7219_Flush();
 
-              // Logic: Wait for PA0 Release then Wait for PA0 Press
-              static uint8_t stop_lock = 1; // Assume button is held when entering state
-
-              // Wait for user to let go of the button
-              if (HAL_GPIO_ReadPin(GPIOA, BTN_STOP_PIN) == GPIO_PIN_RESET) {
-            	  stop_lock = 0;
+              // Wait for Reset (Active LOW)
+              static uint8_t stop_lock = 1;
+              if (HAL_GPIO_ReadPin(BTN_PORT, BTN_RESET_PIN) == GPIO_PIN_SET) {
+            	  stop_lock = 0; // Button released
               }
-
-              // Wait for user to press button again to Reset
-              if (stop_lock == 0 && HAL_GPIO_ReadPin(GPIOA, BTN_STOP_PIN) == GPIO_PIN_SET) {
-            	  // Debounce
+              if (stop_lock == 0 && HAL_GPIO_ReadPin(BTN_PORT, BTN_RESET_PIN) == GPIO_PIN_RESET) {
                   uint32_t tick = HAL_GetTick();
-                  while((HAL_GetTick() - tick) < 200);
+                  while((HAL_GetTick() - tick) < 200); // Debounce
 
                   stop_lock = 1; // Reset latch
                   current_state = STATE_INIT;
@@ -443,16 +464,16 @@ int main(void)
           case STATE_GAMEOVER:
         	  // Loads the game over icon on the display
         	  memcpy(&display_buffer[0], GAME_OVER_ICON, 8);
-              memcpy(&display_buffer[8], GAME_OVER_ICON, 8);
-              MAX7219_Flush();
+        	  memcpy(&display_buffer[8], GAME_OVER_ICON, 8);
+        	  MAX7219_Flush();
 
-              // Waits for the reset button release then wait for the reset press
+              // Waits for the reset button release to then be ready for the press
               static uint8_t restart_latch = 0;
 
-              if (HAL_GPIO_ReadPin(GPIOA, BTN_ANTIROT_PIN) == GPIO_PIN_SET) {
+              if (HAL_GPIO_ReadPin(BTN_PORT, BTN_RESET_PIN) == GPIO_PIN_SET) {
             	  restart_latch = 1; // Ready for the reset press
               }
-              if (restart_latch && HAL_GPIO_ReadPin(GPIOA, BTN_ANTIROT_PIN) == GPIO_PIN_RESET) {
+              if (restart_latch && HAL_GPIO_ReadPin(BTN_PORT, BTN_RESET_PIN) == GPIO_PIN_RESET) {
             	  restart_latch = 0; // Reset flag
                   current_state = STATE_INIT;
               }
@@ -742,25 +763,35 @@ void Tetromino_Draw(uint8_t* buffer) {
     }
 }
 
-void Tetromino_Rotate(void) {
+void Tetromino_Rotate(int8_t direction) {
     int8_t temp_coords[8];
     for (int i = 0; i < 4; i++) {
         int8_t old_x = active_shape_coords[i * 2];
         int8_t old_y = active_shape_coords[i * 2 + 1];
-        temp_coords[i * 2]     = old_y;
-        temp_coords[i * 2 + 1] = -old_x;
+
+        if (direction > 0) {
+            // Clockwise: (x, y) to (-y, x)
+            temp_coords[i * 2]     = old_y;
+            temp_coords[i * 2 + 1] = -old_x;
+        } else {
+            // Anti-Clockwise: (x, y) to (y, -x)
+            temp_coords[i * 2]     = -old_y;
+            temp_coords[i * 2 + 1] = old_x;
+        }
     }
-    uint8_t possible = 1;
+
+    // Check collisions to validate the possible new rotation
+    uint8_t rot_ok = 1;
     for (int i = 0; i < 4; i++) {
         int8_t raw_x = pivot_x + temp_coords[i*2];
         int8_t block_y = pivot_y + temp_coords[i*2 + 1];
         int8_t block_x = Wrap_Coordinate(raw_x);
         if (Check_Pixel_Collision(block_x, block_y)) {
-            possible = 0;
+            rot_ok = 0;
             break;
         }
     }
-    if (possible) memcpy(active_shape_coords, temp_coords, 8);
+    if (rot_ok) memcpy(active_shape_coords, temp_coords, 8);
 }
 
 /* LCD FUNCTIONS */

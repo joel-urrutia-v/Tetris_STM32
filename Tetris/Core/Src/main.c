@@ -26,7 +26,7 @@ typedef enum {
     STATE_INIT,
     STATE_SPAWN,
     STATE_PLAYING,
-    STATE_CHECK_LINES,
+//	  STATE_STATS,
     STATE_STOPPED,
     STATE_GAMEOVER
 } GameState_t;
@@ -34,14 +34,14 @@ typedef enum {
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-// --- MAX7219 REGISTERS ---
+// MAX7219 REGISTERS
 #define REG_SHUTDOWN    0x0C
 #define REG_SCAN_LIMIT  0x0B
 #define REG_DECODE_MODE 0x09
 #define REG_INTENSITY   0x0A
 #define REG_DISPLAY_TEST 0x0F
 
-// --- GAME CONFIG ---
+// GAME CONFIG
 #define NUM_MODULES     2
 #define TOTAL_ROWS      16
 #define TOTAL_COLS      8
@@ -49,15 +49,15 @@ typedef enum {
 #define JOY_LOW         200
 #define JOY_HIGH        3800
 
-// --- SCORING ---
+// SCORING
 #define DROP_POINTS     1
 #define FULLROW_POINTS  40
 #define LNS_CLR_NXT_LVL 4
 
-// --- AUDIO ADDRESS ---
+// AUDIO ADDRESS
 #define CS43L22_ADDR    0x94
 
-// --- SHAPES ---
+// SHAPES
 #define NUM_SHAPES 7
 #define COORDS_PER_SHAPE 8
 /* USER CODE END PD */
@@ -137,7 +137,7 @@ uint8_t MAX7219_GetPixel(uint8_t* buffer, int8_t x, int8_t y);
 
 int8_t Wrap_Coordinate(int8_t x);
 uint8_t Check_Pixel_Collision(int8_t x, int8_t y);
-void Check_Full_Rows(void);
+uint8_t Check_Full_Rows(void);
 
 void Tetromino_Spawn(uint8_t shape_id);
 uint8_t Tetromino_CheckCollision(int8_t target_pivot_x, int8_t target_pivot_y);
@@ -193,12 +193,13 @@ int main(void)
   /* USER CODE BEGIN WHILE */
   while (1)
   {
-      // --- EMERGENCY STOP (Blue Button PA0) ---
-      if (HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_0) == GPIO_PIN_SET) {
-          current_state = STATE_STOPPED;
-          HAL_Delay(500);
-      }
-
+	  // Global Emergency Stop Check
+	  if (current_state != STATE_STOPPED && HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_0) == GPIO_PIN_SET) {
+		  current_state = STATE_STOPPED;
+	      // Debounce wait
+	      uint32_t stop_entry = HAL_GetTick();
+	      while((HAL_GetTick() - stop_entry) < 200);
+	  }
       switch (current_state)
       {
           case STATE_INIT:
@@ -235,20 +236,37 @@ int main(void)
           {
               uint32_t now = HAL_GetTick();
 
-              // 1. Gravity
+              // Gravity Logic
               if (now - last_gravity_time > gravity_speed) {
-                  if (!Tetromino_CheckCollision(pivot_x, pivot_y + 1)) {
-                      pivot_y++;
+            	  if (!Tetromino_CheckCollision(pivot_x, pivot_y + 1)) {
+            		  pivot_y++;
                       game_score += DROP_POINTS;
                   } else {
-                      Tetromino_Lock();
-                      Audio_Beep(150); // Lock Sound
-                      current_state = STATE_CHECK_LINES;
+                	  // Lock Piece
+                	  Tetromino_Lock();
+                	  Audio_Beep(100);
+
+                	  // Line Check Logic ---
+                	  uint8_t cleared_lines = Check_Full_Rows();
+
+                	  if (cleared_lines > 0) {
+                		  // Scoring Logic
+                		  game_score += (cleared_lines * FULLROW_POINTS * game_level);
+                		  lines_cleared += cleared_lines;
+
+                		  // Level Up Logic
+                		  if (lines_cleared >= (game_level * LNS_CLR_NXT_LVL)) {
+                			  game_level++;
+                			  if (gravity_speed > 100) gravity_speed -= 50;
+                		  }
+                		  Audio_Beep(350);
+                	  }
+                  current_state = STATE_SPAWN;
                   }
-                  last_gravity_time = now;
+            	  last_gravity_time = now;
               }
 
-              // 2. Input
+              // Player Input
               if (now - last_input_time > INPUT_DELAY) {
                   uint32_t val_x = Read_ADC_Channel(ADC_CHANNEL_1);
                   uint32_t val_y = Read_ADC_Channel(ADC_CHANNEL_2);
@@ -284,39 +302,51 @@ int main(void)
                   last_input_time = now;
               }
 
-              // 3. Render
+              // Render
               memcpy(display_buffer, locked_buffer, sizeof(locked_buffer));
               Tetromino_Draw(display_buffer);
               MAX7219_Flush();
               break;
           }
 
-          case STATE_CHECK_LINES:
-              Check_Full_Rows();
-              current_state = STATE_SPAWN;
-              break;
-
           case STATE_STOPPED:
-              MAX7219_Clear(display_buffer);
+              // Clears the display
+        	  MAX7219_Clear(display_buffer);
               MAX7219_Flush();
+
+              // Logic: Wait for PA0 Release then Wait for PA0 Press
+              static uint8_t stop_lock = 1; // Assume button is held when entering state
+
+              // Wait for user to let go of the button
+              if (HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_0) == GPIO_PIN_RESET) {
+            	  stop_lock = 0;
+              }
+
+              // Wait for user to press button again to Reset
+              if (stop_lock == 0 && HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_0) == GPIO_PIN_SET) {
+            	  // Debounce
+                  uint32_t tick = HAL_GetTick();
+                  while((HAL_GetTick() - tick) < 200);
+
+                  stop_lock = 1; // Reset latch
+                  current_state = STATE_INIT;
+              }
               break;
 
           case STATE_GAMEOVER:
+        	  // Loads the game over icon on the display
         	  memcpy(&display_buffer[0], GAME_OVER_ICON, 8);
               memcpy(&display_buffer[8], GAME_OVER_ICON, 8);
               MAX7219_Flush();
 
-              // Restart Logic (Wait for Release -> Then Wait for Press)
-              static uint8_t can_restart = 0;
+              // Waits for the reset button release then wait for the reset press
+              static uint8_t restart_latch = 0;
 
-              // Check if button is released (HIGH)
               if (HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_3) == GPIO_PIN_SET) {
-            	  can_restart = 1; // Armed and ready
+            	  restart_latch = 1; // Ready for the reset press
               }
-
-              // Check if button is pressed (LOW) AND we are ready
-              if (can_restart && HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_3) == GPIO_PIN_RESET) {
-            	  can_restart = 0; // Reset flag
+              if (restart_latch && HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_3) == GPIO_PIN_RESET) {
+            	  restart_latch = 0; // Reset flag
                   current_state = STATE_INIT;
               }
               break;
@@ -390,22 +420,21 @@ void Audio_Init(void) {
 
     // Init Sequence (Starts Muted)
     uint8_t cmds[][2] = {
-        {0x02, 0x01}, // Power Down
-        {0x00, 0x99}, {0x47, 0x80}, {0x32, 0xBB}, {0x32, 0x3B}, {0x00, 0x00}, // Required
-        {0x04, 0xAF}, // Headphones ON
-        {0x05, 0x81}, // Clock Auto
-        {0x06, 0x44}, // Slave Mode + MUTE ON (0x44)
-        {0x27, 0x00}, // Limiter Disable
+        {0x02, 0x01}, // Turn OFF
+        {0x00, 0x99}, {0x47, 0x80}, {0x32, 0xBB}, {0x32, 0x3B}, {0x00, 0x00},
+        {0x04, 0xAF},
+        {0x05, 0x81},
+        {0x06, 0x44},
+        {0x27, 0x00},
 
-        // To change volume:
-		// change the four "0x--}" to:
+        // To change volume,
+		// change the four next "0x--}" to:
 		// 0x18} = MAX
 		// 0x10} = High
 		// 0x0A} = Medium
-        {0x1A, 0x10}, {0x1B, 0x10},
-        {0x20, 0x10}, {0x21, 0x10},
+        {0x1A, 0x10}, {0x1B, 0x10}, {0x20, 0x10}, {0x21, 0x10}, // Volume level
 
-        {0x02, 0x9E}  // Power UP
+        {0x02, 0x9E}  // Turn ON
     };
 
     for (int i = 0; i < 16; i++) {
@@ -416,13 +445,12 @@ void Audio_Init(void) {
 }
 
 void Audio_Beep(uint16_t duration_ms) {
-    // Prepare 500Hz Square Wave
+    // Square wave preparation
     int16_t tone_buffer[192];
     for (int i = 0; i < 192; i++) {
         tone_buffer[i] = (i < 96) ? 32000 : -32000;
     }
-
-    // UNMUTE (Register 0x06 -> 0x04)
+    // Unmute (Register 0x06 to 0x04)
     uint8_t unmute_cmd[] = {0x06, 0x04};
     HAL_I2C_Master_Transmit(&hi2c1, CS43L22_ADDR, unmute_cmd, 2, 10);
 
@@ -433,11 +461,11 @@ void Audio_Beep(uint16_t duration_ms) {
         HAL_I2S_Transmit(&hi2s3, (uint16_t*)tone_buffer, 192, 10);
     }
 
-    // Play tiny silence to bring voltage to Zero (Prevents "Pop")
+    // Play tiny silence to bring voltage to Zero (to prevent "Pop")
     int16_t zero_buffer[4] = {0, 0, 0, 0};
     HAL_I2S_Transmit(&hi2s3, (uint16_t*)zero_buffer, 4, 10);
 
-    // MUTE (Register 0x06 -> 0x44)
+    // Mute (Register 0x06 to 0x44)
     uint8_t mute_cmd[] = {0x06, 0x44};
     HAL_I2C_Master_Transmit(&hi2c1, CS43L22_ADDR, mute_cmd, 2, 10);
 }
@@ -449,14 +477,14 @@ void Screen_Init(void) {
         {REG_SCAN_LIMIT, 0x07},
 		{REG_DECODE_MODE, 0x00},
 
-		// CHANGE BRIGHTNESS HERE:
-		// 0x00 = Min
-		// 0x02 = Medium
-		// 0x04 = High
-        {REG_INTENSITY, 0x01}
+		// To change brightness,
+		// change the next "0x--}" to:
+		// 0x00} = Min.
+		// 0x02} = Medium
+		// 0x04} = High
+        {REG_INTENSITY, 0x01} // Brightness level
     };
     for (int c = 0; c < 5; c++) {
-        // NOTE: USING PD0 for CS (Based on latest fix)
         HAL_GPIO_WritePin(GPIOA, GPIO_PIN_6, GPIO_PIN_RESET);
         for(int m=0; m<NUM_MODULES; m++) {
             HAL_SPI_Transmit(&hspi1, &commands[c][0], 1, 10);
@@ -539,33 +567,35 @@ uint8_t Check_Pixel_Collision(int8_t x, int8_t y) {
     return 0;
 }
 
-void Check_Full_Rows(void) {
-    for (int y = TOTAL_ROWS - 1; y >= 0; y--) {
-        uint8_t is_full = 1;
-        for (int x = 0; x < TOTAL_COLS; x++) {
+uint8_t Check_Full_Rows(void) {
+    uint8_t fr_count = 0;
+
+    for (int8_t y = TOTAL_ROWS - 1; y >= 0; y--) {
+        uint8_t row_full = 1;
+
+        for (uint8_t x = 0; x < TOTAL_COLS; x++) {
             if (MAX7219_GetPixel(locked_buffer, x, y) == 0) {
-                is_full = 0;
+                row_full = 0;
                 break;
             }
         }
-        if (is_full) {
-            Audio_Beep(400);
-            game_score += (FULLROW_POINTS * game_level);
-            lines_cleared++;
-            if (lines_cleared % LNS_CLR_NXT_LVL == 0) {
-                game_level++;
-                if (gravity_speed > 100) gravity_speed -= 50;
-            }
-            for (int k = y; k > 0; k--) {
-                for (int x = 0; x < TOTAL_COLS; x++) {
+        if (row_full) {
+            fr_count++;
+            // Move all rows above this one down
+            for (int8_t k = y; k > 0; k--) {
+                for (uint8_t x = 0; x < TOTAL_COLS; x++) {
                     uint8_t pixel_above = MAX7219_GetPixel(locked_buffer, x, k - 1);
                     MAX7219_SetPixel(locked_buffer, x, k, pixel_above);
                 }
             }
-            for (int x = 0; x < TOTAL_COLS; x++) MAX7219_SetPixel(locked_buffer, x, 0, 0);
+            // Clear top row
+            for (uint8_t x = 0; x < TOTAL_COLS; x++) {
+                MAX7219_SetPixel(locked_buffer, x, 0, 0);
+            }
             y++;
         }
     }
+    return fr_count;
 }
 
 void Tetromino_Spawn(uint8_t shape_id) {

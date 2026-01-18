@@ -18,6 +18,7 @@
 /* USER CODE BEGIN Includes */
 #include <string.h>
 #include <stdlib.h>
+#include <stdio.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -34,32 +35,124 @@ typedef enum {
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-// MAX7219 REGISTERS
+// MAX7219 LED MATRIX
+#define MTX_PORT     GPIOA
+#define MTX_CS_PIN   GPIO_PIN_6  // Chip Select (Load)
+
+// JOYSTICK and INPUTS
+#define JS_RX_CHANNEL   ADC_CHANNEL_1 // PA1
+#define JS_RY_CHANNEL   ADC_CHANNEL_2 // PA2
+#define BTN_ANTIROT_PIN GPIO_PIN_3    // PA3 (Anti-clockwise Rotation)
+#define BTN_STOP_PIN    GPIO_PIN_0    // PA0 (Stop/Reset)
+#define BTN_PORT        GPIOA
+
+// AUDIO
+#define AUDIO_RESET_PORT GPIOD
+#define AUDIO_RESET_PIN  GPIO_PIN_4   // PD4
+
+// LCD
+#define LCD_PORT   GPIOE
+#define RS_PIN     GPIO_PIN_7
+#define E_PIN      GPIO_PIN_8
+#define D4_PIN     GPIO_PIN_9
+#define D5_PIN     GPIO_PIN_10
+#define D6_PIN     GPIO_PIN_11
+#define D7_PIN     GPIO_PIN_12
+
+// REGISTER ADDRESSES
 #define REG_SHUTDOWN    0x0C
 #define REG_SCAN_LIMIT  0x0B
 #define REG_DECODE_MODE 0x09
 #define REG_INTENSITY   0x0A
 #define REG_DISPLAY_TEST 0x0F
+#define CS43L22_ADDR    0x94
 
-// GAME CONFIG
+// GAME PARAMETERS
 #define NUM_MODULES     2
 #define TOTAL_ROWS      16
 #define TOTAL_COLS      8
 #define INPUT_DELAY     100
-#define JOY_LOW         200
-#define JOY_HIGH        3800
-
-// SCORING
+#define JS_LOW          200
+#define JS_HIGH         3800
 #define DROP_POINTS     1
 #define FULLROW_POINTS  40
 #define LNS_CLR_NXT_LVL 4
+#define NUM_SHAPES      7
 
-// AUDIO ADDRESS
-#define CS43L22_ADDR    0x94
-
-// SHAPES
-#define NUM_SHAPES 7
-#define COORDS_PER_SHAPE 8
+// LCD Custom Characters (Binary Format)
+// 0:I, 1:J, 2:L, 3:O, 4:S, 5:T, 6:Z
+const uint8_t TETRIS_LCD_CHARS[NUM_SHAPES][8] = {
+    { // 0: I
+      0b01110,
+	  0b01110,
+	  0b01110,
+	  0b01110,
+      0b01110,
+	  0b01110,
+	  0b01110,
+	  0b01110
+    },
+    { // 1: J
+      0b00111,
+	  0b00111,
+	  0b00111,
+	  0b00111,
+      0b11111,
+	  0b11111,
+	  0b11111,
+	  0b00000
+    },
+    { // 2: L
+      0b11100,
+	  0b11100,
+	  0b11100,
+	  0b11100,
+      0b11111,
+	  0b11111,
+	  0b11111,
+	  0b00000
+    },
+    { // 3: O
+      0b11111,
+	  0b11111,
+	  0b11111,
+	  0b11111,
+      0b11111,
+	  0b11111,
+	  0b11111,
+	  0b00000
+    },
+    { // 4: S
+      0b01111,
+	  0b01111,
+	  0b01111,
+	  0b11110,
+      0b11110,
+	  0b11110,
+	  0b00000,
+	  0b00000
+    },
+    { // 5: T
+      0b11111,
+	  0b11111,
+	  0b11111,
+	  0b00100,
+      0b00100,
+	  0b00100,
+	  0b00100,
+	  0b00000
+    },
+    { // 6: Z
+      0b11110,
+	  0b11110,
+	  0b11110,
+	  0b01111,
+      0b01111,
+	  0b01111,
+	  0b00000,
+	  0b00000
+    }
+};
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -76,8 +169,9 @@ extern ADC_HandleTypeDef hadc1;
 extern I2C_HandleTypeDef hi2c1;
 extern I2S_HandleTypeDef hi2s3;
 
-// Shapes Database
-const int8_t SHAPES[NUM_SHAPES][COORDS_PER_SHAPE] = {
+// MAX7219 LED Matrix Display Custom Shapes
+//	0:I, 1:J, 2:L, 3:O, 4:S, 5:T, 6:Z
+const int8_t SHAPES[NUM_SHAPES][8] = {
 //  {x1,y1,   x2,y2,   x3,y3,   x4,y4}
 	{-1, 0,   0, 0,   1, 0,   2, 0}, // I
     {-1,-1,  -1, 0,   0, 0,   1, 0}, // J
@@ -87,7 +181,6 @@ const int8_t SHAPES[NUM_SHAPES][COORDS_PER_SHAPE] = {
 	{ 0,-1,  -1, 0,   0, 0,   1, 0}, // T
 	{-1,-1,   0,-1,   0, 0,   1, 0}  // Z
 };
-
 const uint8_t GAME_OVER_ICON[8] = {
     0b10000001,
 	0b01000010,
@@ -103,20 +196,21 @@ const uint8_t GAME_OVER_ICON[8] = {
 GameState_t current_state = STATE_INIT;
 int8_t pivot_x = 0;
 int8_t pivot_y = 0;
-int8_t active_shape_coords[COORDS_PER_SHAPE];
+int8_t active_shape_coords[8];
 uint8_t current_shape_id = 3;
 
 // Display Memory
 uint8_t display_buffer[TOTAL_ROWS];
 uint8_t locked_buffer[TOTAL_ROWS];
 
-// Timing & Physics
+// Timing and Physics
 uint32_t last_input_time = 0;
 uint32_t last_gravity_time = 0;
 uint32_t gravity_speed = 500; // The lower the faster
 
 // Stats
 volatile uint8_t game_level = 1;
+volatile uint8_t next_shape_id = 0;
 volatile uint32_t game_score = 0;
 volatile uint32_t lines_cleared = 0;
 /* USER CODE END PV */
@@ -124,26 +218,39 @@ volatile uint32_t lines_cleared = 0;
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 /* USER CODE BEGIN PFP */
+
+// MAX7219 LED Matrix Display Functions
 void Screen_Init(void);
-void Audio_Init(void);
-void Audio_Beep(uint16_t duration_ms);
-
-uint32_t Read_ADC_Channel(uint32_t channel);
-
 void MAX7219_Flush(void);
 void MAX7219_Clear(uint8_t* buffer);
 void MAX7219_SetPixel(uint8_t* buffer, int8_t x, int8_t y, uint8_t state);
 uint8_t MAX7219_GetPixel(uint8_t* buffer, int8_t x, int8_t y);
+uint32_t Read_ADC_Channel(uint32_t channel);
 
+// Audio Functions
+void Audio_Init(void);
+void Audio_Beep(uint16_t duration_ms);
+
+// Base Game Logic Functions
 int8_t Wrap_Coordinate(int8_t x);
 uint8_t Check_Pixel_Collision(int8_t x, int8_t y);
 uint8_t Check_Full_Rows(void);
 
+// Tetromino Functions
 void Tetromino_Spawn(uint8_t shape_id);
 uint8_t Tetromino_CheckCollision(int8_t target_pivot_x, int8_t target_pivot_y);
 void Tetromino_Lock(void);
 void Tetromino_Draw(uint8_t* buffer);
 void Tetromino_Rotate(void);
+
+// LCD Display Functions
+void LCD_Init(void);
+void LCD_SendCommand(uint8_t cmd);
+void LCD_SendData(uint8_t data);
+void LCD_SendString(char *str);
+void LCD_SetCursor(uint8_t row, uint8_t col);
+void LCD_LoadCustomChars(void);
+void LCD_UpdateStats(void);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -194,7 +301,7 @@ int main(void)
   while (1)
   {
 	  // Global Emergency Stop Check
-	  if (current_state != STATE_STOPPED && HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_0) == GPIO_PIN_SET) {
+	  if (current_state != STATE_STOPPED && HAL_GPIO_ReadPin(GPIOA, BTN_STOP_PIN) == GPIO_PIN_SET) {
 		  current_state = STATE_STOPPED;
 	      // Debounce wait
 	      uint32_t stop_entry = HAL_GetTick();
@@ -211,7 +318,7 @@ int main(void)
               MAX7219_Clear(display_buffer);
 
               // Seed random with ADC noise
-              srand(HAL_GetTick() + Read_ADC_Channel(ADC_CHANNEL_1));
+              srand(HAL_GetTick() + Read_ADC_Channel(JS_RX_CHANNEL));
 
               game_score = 0;
               game_level = 1;
@@ -268,13 +375,13 @@ int main(void)
 
               // Player Input
               if (now - last_input_time > INPUT_DELAY) {
-                  uint32_t val_x = Read_ADC_Channel(ADC_CHANNEL_1);
-                  uint32_t val_y = Read_ADC_Channel(ADC_CHANNEL_2);
+                  uint32_t val_x = Read_ADC_Channel(JS_RX_CHANNEL);
+                  uint32_t val_y = Read_ADC_Channel(JS_RY_CHANNEL);
                   int8_t next_x = pivot_x;
 
                   // X Movement
-                  if (val_x < JOY_LOW) next_x--;
-                  else if (val_x > JOY_HIGH) next_x++;
+                  if (val_x < JS_LOW) next_x--;
+                  else if (val_x > JS_HIGH) next_x++;
 
                   if(next_x < 0) next_x = TOTAL_COLS - 1;
                   if(next_x >= TOTAL_COLS) next_x = 0;
@@ -282,7 +389,7 @@ int main(void)
                   if (!Tetromino_CheckCollision(next_x, pivot_y)) pivot_x = next_x;
 
                   // Drop
-                  if (val_y > JOY_HIGH) {
+                  if (val_y > JS_HIGH) {
                       if (!Tetromino_CheckCollision(pivot_x, pivot_y + 1)) {
                           pivot_y++;
                           game_score += DROP_POINTS;
@@ -291,7 +398,7 @@ int main(void)
 
                   // Rotation (PA3)
                   static uint8_t rot_pressed = 0;
-                  if (HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_3) == GPIO_PIN_RESET) {
+                  if (HAL_GPIO_ReadPin(GPIOA, BTN_ANTIROT_PIN) == GPIO_PIN_RESET) {
                       if (rot_pressed == 0) {
                           Tetromino_Rotate();
                           rot_pressed = 1;
@@ -318,12 +425,12 @@ int main(void)
               static uint8_t stop_lock = 1; // Assume button is held when entering state
 
               // Wait for user to let go of the button
-              if (HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_0) == GPIO_PIN_RESET) {
+              if (HAL_GPIO_ReadPin(GPIOA, BTN_STOP_PIN) == GPIO_PIN_RESET) {
             	  stop_lock = 0;
               }
 
               // Wait for user to press button again to Reset
-              if (stop_lock == 0 && HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_0) == GPIO_PIN_SET) {
+              if (stop_lock == 0 && HAL_GPIO_ReadPin(GPIOA, BTN_STOP_PIN) == GPIO_PIN_SET) {
             	  // Debounce
                   uint32_t tick = HAL_GetTick();
                   while((HAL_GetTick() - tick) < 200);
@@ -342,10 +449,10 @@ int main(void)
               // Waits for the reset button release then wait for the reset press
               static uint8_t restart_latch = 0;
 
-              if (HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_3) == GPIO_PIN_SET) {
+              if (HAL_GPIO_ReadPin(GPIOA, BTN_ANTIROT_PIN) == GPIO_PIN_SET) {
             	  restart_latch = 1; // Ready for the reset press
               }
-              if (restart_latch && HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_3) == GPIO_PIN_RESET) {
+              if (restart_latch && HAL_GPIO_ReadPin(GPIOA, BTN_ANTIROT_PIN) == GPIO_PIN_RESET) {
             	  restart_latch = 0; // Reset flag
                   current_state = STATE_INIT;
               }
@@ -406,16 +513,146 @@ void SystemClock_Config(void)
 
 /* USER CODE BEGIN 4 */
 
-/* --- HELPER FUNCTIONS --- */
+/* MAX7219 LED MATRIX DISPLAY FUNCTIONS */
+void Screen_Init(void) {
+    uint8_t commands[][2] = {
+        {REG_DISPLAY_TEST, 0x00},
+		{REG_SHUTDOWN, 0x01},
+        {REG_SCAN_LIMIT, 0x07},
+		{REG_DECODE_MODE, 0x00},
 
+		// To change brightness,
+		// change the next "0x--}" to:
+		// 0x00} = Min.
+		// 0x02} = Medium
+		// 0x04} = High
+        {REG_INTENSITY, 0x01} // Brightness level
+    };
+    for (int c = 0; c < 5; c++) {
+    	HAL_GPIO_WritePin(MTX_PORT, MTX_CS_PIN, GPIO_PIN_RESET);
+        for(int m=0; m<NUM_MODULES; m++) {
+            HAL_SPI_Transmit(&hspi1, &commands[c][0], 1, 10);
+            HAL_SPI_Transmit(&hspi1, &commands[c][1], 1, 10);
+        }
+        HAL_GPIO_WritePin(MTX_PORT, MTX_CS_PIN, GPIO_PIN_SET);
+    }
+}
+
+void MAX7219_Flush(void) {
+    // Defines for readability
+    uint8_t configs[][2] = {
+        {REG_DISPLAY_TEST, 0x00},
+		{REG_SCAN_LIMIT,   0x07},
+        {REG_DECODE_MODE,  0x00},
+		{REG_SHUTDOWN,     0x01}
+    };
+
+    // Send Configs (Safety Refresh)
+    for(int c=0; c<4; c++) {
+        HAL_GPIO_WritePin(MTX_PORT, MTX_CS_PIN, GPIO_PIN_RESET);
+        for(int m=0; m<NUM_MODULES; m++) {
+            HAL_SPI_Transmit(&hspi1, &configs[c][0], 1, 10);
+            HAL_SPI_Transmit(&hspi1, &configs[c][1], 1, 10);
+        }
+        HAL_GPIO_WritePin(MTX_PORT, MTX_CS_PIN, GPIO_PIN_SET);
+    }
+
+    // Send Pixels
+    for (uint8_t i = 0; i < 8; i++) {
+        uint8_t addr = i + 1;
+        HAL_GPIO_WritePin(MTX_PORT, MTX_CS_PIN, GPIO_PIN_RESET);
+        HAL_SPI_Transmit(&hspi1, &addr, 1, 10);
+        HAL_SPI_Transmit(&hspi1, &display_buffer[8 + i], 1, 10);
+        HAL_SPI_Transmit(&hspi1, &addr, 1, 10);
+        HAL_SPI_Transmit(&hspi1, &display_buffer[i], 1, 10);
+        HAL_GPIO_WritePin(MTX_PORT, MTX_CS_PIN, GPIO_PIN_SET);
+    }
+}
+
+void MAX7219_Clear(uint8_t* buffer) { memset(buffer, 0, TOTAL_ROWS); }
+
+void MAX7219_SetPixel(uint8_t* buffer, int8_t x, int8_t y, uint8_t state) {
+    if (x < 0 || x >= TOTAL_COLS || y < 0 || y >= TOTAL_ROWS) return;
+    uint8_t module_offset = (y < 8) ? 8 : 0;
+    int8_t local_y = (y < 8) ? y : y - 8;
+    if (state) buffer[module_offset + x] |= (1 << local_y);
+    else       buffer[module_offset + x] &= ~(1 << local_y);
+}
+
+uint8_t MAX7219_GetPixel(uint8_t* buffer, int8_t x, int8_t y) {
+    if (x < 0 || x >= TOTAL_COLS || y < 0 || y >= TOTAL_ROWS) return 0;
+    uint8_t module_offset = (y < 8) ? 8 : 0;
+    int8_t local_y = (y < 8) ? y : y - 8;
+    return (buffer[module_offset + x] & (1 << local_y)) ? 1 : 0;
+}
+
+uint32_t Read_ADC_Channel(uint32_t channel) {
+    ADC_ChannelConfTypeDef sConfig = {0};
+    sConfig.Channel = channel;
+    sConfig.Rank = 1;
+    sConfig.SamplingTime = ADC_SAMPLETIME_3CYCLES;
+    if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK) Error_Handler();
+    HAL_ADC_Start(&hadc1);
+    if (HAL_ADC_PollForConversion(&hadc1, 10) == HAL_OK) {
+        uint32_t val = HAL_ADC_GetValue(&hadc1);
+        HAL_ADC_Stop(&hadc1);
+        return val;
+    }
+    HAL_ADC_Stop(&hadc1);
+    return 2048;
+}
+
+/* BASE GAME LOGIC FUNCTIONS */
+int8_t Wrap_Coordinate(int8_t x) {
+    return (x % TOTAL_COLS + TOTAL_COLS) % TOTAL_COLS;
+}
+
+uint8_t Check_Pixel_Collision(int8_t x, int8_t y) {
+    if (y >= TOTAL_ROWS) return 1;
+    if (MAX7219_GetPixel(locked_buffer, x, y)) return 1;
+    return 0;
+}
+
+uint8_t Check_Full_Rows(void) {
+    uint8_t fr_count = 0;
+
+    for (int8_t y = TOTAL_ROWS - 1; y >= 0; y--) {
+        uint8_t row_full = 1;
+
+        for (uint8_t x = 0; x < TOTAL_COLS; x++) {
+            if (MAX7219_GetPixel(locked_buffer, x, y) == 0) {
+                row_full = 0;
+                break;
+            }
+        }
+        if (row_full) {
+            fr_count++;
+            // Move all rows above this one down
+            for (int8_t k = y; k > 0; k--) {
+                for (uint8_t x = 0; x < TOTAL_COLS; x++) {
+                    uint8_t pixel_above = MAX7219_GetPixel(locked_buffer, x, k - 1);
+                    MAX7219_SetPixel(locked_buffer, x, k, pixel_above);
+                }
+            }
+            // Clear top row
+            for (uint8_t x = 0; x < TOTAL_COLS; x++) {
+                MAX7219_SetPixel(locked_buffer, x, 0, 0);
+            }
+            y++;
+        }
+    }
+    return fr_count;
+}
+
+/* AUDIO FUNCTIONS */
 void Audio_Init(void) {
     uint32_t start_tick;
 
-    HAL_GPIO_WritePin(GPIOD, GPIO_PIN_4, GPIO_PIN_RESET);
-    start_tick = HAL_GetTick();
+    HAL_GPIO_WritePin(AUDIO_RESET_PORT, AUDIO_RESET_PIN, GPIO_PIN_RESET);
+	start_tick = HAL_GetTick();
     while((HAL_GetTick() - start_tick) < 50);
-    HAL_GPIO_WritePin(GPIOD, GPIO_PIN_4, GPIO_PIN_SET);
-    start_tick = HAL_GetTick();
+    HAL_GPIO_WritePin(AUDIO_RESET_PORT, AUDIO_RESET_PIN, GPIO_PIN_SET);
+	start_tick = HAL_GetTick();
     while((HAL_GetTick() - start_tick) < 50);
 
     // Init Sequence (Starts Muted)
@@ -470,137 +707,10 @@ void Audio_Beep(uint16_t duration_ms) {
     HAL_I2C_Master_Transmit(&hi2c1, CS43L22_ADDR, mute_cmd, 2, 10);
 }
 
-void Screen_Init(void) {
-    uint8_t commands[][2] = {
-        {REG_DISPLAY_TEST, 0x00},
-		{REG_SHUTDOWN, 0x01},
-        {REG_SCAN_LIMIT, 0x07},
-		{REG_DECODE_MODE, 0x00},
-
-		// To change brightness,
-		// change the next "0x--}" to:
-		// 0x00} = Min.
-		// 0x02} = Medium
-		// 0x04} = High
-        {REG_INTENSITY, 0x01} // Brightness level
-    };
-    for (int c = 0; c < 5; c++) {
-        HAL_GPIO_WritePin(GPIOA, GPIO_PIN_6, GPIO_PIN_RESET);
-        for(int m=0; m<NUM_MODULES; m++) {
-            HAL_SPI_Transmit(&hspi1, &commands[c][0], 1, 10);
-            HAL_SPI_Transmit(&hspi1, &commands[c][1], 1, 10);
-        }
-        HAL_GPIO_WritePin(GPIOA, GPIO_PIN_6, GPIO_PIN_SET);
-    }
-}
-
-void MAX7219_Flush(void) {
-    uint8_t cfg0[] = {REG_DISPLAY_TEST, 0x00};
-    HAL_GPIO_WritePin(GPIOA, GPIO_PIN_6, GPIO_PIN_RESET);
-    for(int m=0; m<NUM_MODULES; m++) {
-        HAL_SPI_Transmit(&hspi1, &cfg0[0], 1, 10);
-        HAL_SPI_Transmit(&hspi1, &cfg0[1], 1, 10);
-    }
-    HAL_GPIO_WritePin(GPIOA, GPIO_PIN_6, GPIO_PIN_SET);
-
-    uint8_t cfg1[] = {REG_SCAN_LIMIT, 0x07};
-    HAL_GPIO_WritePin(GPIOA, GPIO_PIN_6, GPIO_PIN_RESET);
-    for(int m=0; m<NUM_MODULES; m++) {
-        HAL_SPI_Transmit(&hspi1, &cfg1[0], 1, 10);
-        HAL_SPI_Transmit(&hspi1, &cfg1[1], 1, 10);
-    }
-    HAL_GPIO_WritePin(GPIOA, GPIO_PIN_6, GPIO_PIN_SET);
-
-    uint8_t cfg2[] = {REG_DECODE_MODE, 0x00};
-    HAL_GPIO_WritePin(GPIOA, GPIO_PIN_6, GPIO_PIN_RESET);
-    for(int m=0; m<NUM_MODULES; m++) {
-        HAL_SPI_Transmit(&hspi1, &cfg2[0], 1, 10);
-        HAL_SPI_Transmit(&hspi1, &cfg2[1], 1, 10);
-    }
-    HAL_GPIO_WritePin(GPIOA, GPIO_PIN_6, GPIO_PIN_SET);
-
-    // Force Wakeup
-    uint8_t cfg3[] = {REG_SHUTDOWN, 0x01};
-    HAL_GPIO_WritePin(GPIOA, GPIO_PIN_6, GPIO_PIN_RESET);
-    for(int m=0; m<NUM_MODULES; m++) {
-        HAL_SPI_Transmit(&hspi1, &cfg3[0], 1, 10);
-        HAL_SPI_Transmit(&hspi1, &cfg3[1], 1, 10);
-    }
-    HAL_GPIO_WritePin(GPIOA, GPIO_PIN_6, GPIO_PIN_SET);
-
-    // Pixel Data
-    for (uint8_t i = 0; i < 8; i++) {
-        uint8_t addr = i + 1;
-        HAL_GPIO_WritePin(GPIOA, GPIO_PIN_6, GPIO_PIN_RESET);
-        HAL_SPI_Transmit(&hspi1, &addr, 1, 10);
-        HAL_SPI_Transmit(&hspi1, &display_buffer[8 + i], 1, 10);
-        HAL_SPI_Transmit(&hspi1, &addr, 1, 10);
-        HAL_SPI_Transmit(&hspi1, &display_buffer[i], 1, 10);
-        HAL_GPIO_WritePin(GPIOA, GPIO_PIN_6, GPIO_PIN_SET);
-    }
-}
-
-void MAX7219_Clear(uint8_t* buffer) { memset(buffer, 0, TOTAL_ROWS); }
-
-void MAX7219_SetPixel(uint8_t* buffer, int8_t x, int8_t y, uint8_t state) {
-    if (x < 0 || x >= TOTAL_COLS || y < 0 || y >= TOTAL_ROWS) return;
-    uint8_t module_offset = (y < 8) ? 8 : 0;
-    int8_t local_y = (y < 8) ? y : y - 8;
-    if (state) buffer[module_offset + x] |= (1 << local_y);
-    else       buffer[module_offset + x] &= ~(1 << local_y);
-}
-
-uint8_t MAX7219_GetPixel(uint8_t* buffer, int8_t x, int8_t y) {
-    if (x < 0 || x >= TOTAL_COLS || y < 0 || y >= TOTAL_ROWS) return 0;
-    uint8_t module_offset = (y < 8) ? 8 : 0;
-    int8_t local_y = (y < 8) ? y : y - 8;
-    return (buffer[module_offset + x] & (1 << local_y)) ? 1 : 0;
-}
-
-int8_t Wrap_Coordinate(int8_t x) {
-    return (x % TOTAL_COLS + TOTAL_COLS) % TOTAL_COLS;
-}
-
-uint8_t Check_Pixel_Collision(int8_t x, int8_t y) {
-    if (y >= TOTAL_ROWS) return 1;
-    if (MAX7219_GetPixel(locked_buffer, x, y)) return 1;
-    return 0;
-}
-
-uint8_t Check_Full_Rows(void) {
-    uint8_t fr_count = 0;
-
-    for (int8_t y = TOTAL_ROWS - 1; y >= 0; y--) {
-        uint8_t row_full = 1;
-
-        for (uint8_t x = 0; x < TOTAL_COLS; x++) {
-            if (MAX7219_GetPixel(locked_buffer, x, y) == 0) {
-                row_full = 0;
-                break;
-            }
-        }
-        if (row_full) {
-            fr_count++;
-            // Move all rows above this one down
-            for (int8_t k = y; k > 0; k--) {
-                for (uint8_t x = 0; x < TOTAL_COLS; x++) {
-                    uint8_t pixel_above = MAX7219_GetPixel(locked_buffer, x, k - 1);
-                    MAX7219_SetPixel(locked_buffer, x, k, pixel_above);
-                }
-            }
-            // Clear top row
-            for (uint8_t x = 0; x < TOTAL_COLS; x++) {
-                MAX7219_SetPixel(locked_buffer, x, 0, 0);
-            }
-            y++;
-        }
-    }
-    return fr_count;
-}
-
+/* TETROMINO FUNCTIONS */
 void Tetromino_Spawn(uint8_t shape_id) {
     if (shape_id >= NUM_SHAPES) shape_id = 0;
-    memcpy(active_shape_coords, SHAPES[shape_id], COORDS_PER_SHAPE);
+    memcpy(active_shape_coords, SHAPES[shape_id], 8);
     pivot_x = 3; pivot_y = 0; current_shape_id = shape_id;
 }
 
@@ -633,7 +743,7 @@ void Tetromino_Draw(uint8_t* buffer) {
 }
 
 void Tetromino_Rotate(void) {
-    int8_t temp_coords[COORDS_PER_SHAPE];
+    int8_t temp_coords[8];
     for (int i = 0; i < 4; i++) {
         int8_t old_x = active_shape_coords[i * 2];
         int8_t old_y = active_shape_coords[i * 2 + 1];
@@ -650,23 +760,86 @@ void Tetromino_Rotate(void) {
             break;
         }
     }
-    if (possible) memcpy(active_shape_coords, temp_coords, COORDS_PER_SHAPE);
+    if (possible) memcpy(active_shape_coords, temp_coords, 8);
 }
 
-uint32_t Read_ADC_Channel(uint32_t channel) {
-    ADC_ChannelConfTypeDef sConfig = {0};
-    sConfig.Channel = channel;
-    sConfig.Rank = 1;
-    sConfig.SamplingTime = ADC_SAMPLETIME_3CYCLES;
-    if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK) Error_Handler();
-    HAL_ADC_Start(&hadc1);
-    if (HAL_ADC_PollForConversion(&hadc1, 10) == HAL_OK) {
-        uint32_t val = HAL_ADC_GetValue(&hadc1);
-        HAL_ADC_Stop(&hadc1);
-        return val;
+/* LCD FUNCTIONS */
+void LCD_Send4Bits(uint8_t val) {
+    HAL_GPIO_WritePin(LCD_PORT, D4_PIN, (val >> 0) & 0x01);
+    HAL_GPIO_WritePin(LCD_PORT, D5_PIN, (val >> 1) & 0x01);
+    HAL_GPIO_WritePin(LCD_PORT, D6_PIN, (val >> 2) & 0x01);
+    HAL_GPIO_WritePin(LCD_PORT, D7_PIN, (val >> 3) & 0x01);
+}
+
+void LCD_EnablePulse(void) {
+    HAL_GPIO_WritePin(LCD_PORT, E_PIN, GPIO_PIN_SET);
+    HAL_Delay(1);
+    HAL_GPIO_WritePin(LCD_PORT, E_PIN, GPIO_PIN_RESET);
+    HAL_Delay(1);
+}
+
+void LCD_SendCommand(uint8_t cmd) {
+    HAL_GPIO_WritePin(LCD_PORT, RS_PIN, GPIO_PIN_RESET);
+    LCD_Send4Bits(cmd >> 4);
+    LCD_EnablePulse();
+    LCD_Send4Bits(cmd);
+    LCD_EnablePulse();
+}
+
+void LCD_SendData(uint8_t data) {
+    HAL_GPIO_WritePin(LCD_PORT, RS_PIN, GPIO_PIN_SET);
+    LCD_Send4Bits(data >> 4);
+    LCD_EnablePulse();
+    LCD_Send4Bits(data);
+    LCD_EnablePulse();
+}
+
+void LCD_Init(void) {
+    HAL_Delay(50);
+    HAL_GPIO_WritePin(LCD_PORT, RS_PIN, GPIO_PIN_RESET);
+
+    LCD_Send4Bits(0x03); LCD_EnablePulse(); HAL_Delay(5);
+    LCD_Send4Bits(0x03); LCD_EnablePulse(); HAL_Delay(1);
+    LCD_Send4Bits(0x03); LCD_EnablePulse(); HAL_Delay(1);
+    LCD_Send4Bits(0x02); LCD_EnablePulse();
+
+    LCD_SendCommand(0x28);
+    LCD_SendCommand(0x0C);
+    LCD_SendCommand(0x06);
+    LCD_SendCommand(0x01);
+    HAL_Delay(2);
+}
+
+void LCD_LoadCustomChars(void) {
+    LCD_SendCommand(0x40);
+    for (int i = 0; i < 7; i++) {
+        for (int j = 0; j < 8; j++) {
+            LCD_SendData(TETRIS_LCD_CHARS[i][j]);
+        }
     }
-    HAL_ADC_Stop(&hadc1);
-    return 2048;
+    LCD_SendCommand(0x80);
+}
+
+void LCD_SendString(char *str) {
+    while (*str) LCD_SendData(*str++);
+}
+
+void LCD_SetCursor(uint8_t row, uint8_t col) {
+    uint8_t address = (row == 0) ? (0x80 + col) : (0xC0 + col);
+    LCD_SendCommand(address);
+}
+
+void LCD_UpdateStats(void) {
+    char buffer[16];
+    LCD_SetCursor(0, 0);
+    sprintf(buffer, "Score:%lu   ", game_score);
+    LCD_SendString(buffer);
+
+    LCD_SetCursor(1, 0);
+    sprintf(buffer, "Lvl:%d Next:", game_level);
+    LCD_SendString(buffer);
+    LCD_SendData(next_shape_id);
+    LCD_SendString(" ");
 }
 /* USER CODE END 4 */
 

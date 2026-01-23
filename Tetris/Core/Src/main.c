@@ -1,9 +1,12 @@
 /* USER CODE BEGIN Header */
 /**
-  * PROJECT: STM32 Tetris
+  * PROJECT: STM32 TETRIS
   * BOARD: STM32F411E-DISCO
-  * AUDIO: CS43L22 (I2S3/I2C1)
-  * SCREEN: MAX7219 (SPI1/PD0)
+  *
+  * COMPONENT REQUIREMENTS:
+  * + 2 LED MATRIX DISPLAYS (MAX7219)
+  * + 1 ANALOG JOYSTICK
+  * + 1 LCD CHARACTER DISPLAY (HD44780)
   */
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
@@ -409,7 +412,6 @@ int main(void)
           case STATE_SPAWN:
           {
               Tetromino_Spawn(next_shape_id);
-
               if (Tetromino_CheckCollision(pivot_x, pivot_y)) {
             	  Audio_Beep(300);
             	  current_state = STATE_GAMEOVER;
@@ -435,8 +437,7 @@ int main(void)
                   }
             	  last_gravity_time = now;
               }
-
-              // Player Input
+              // Joystick Input
               if (now - last_input_time > DEBOUNCE_DELAY) {
                   uint32_t val_x = Read_ADC_Channel(JS_RX_CHANNEL);
                   uint32_t val_y = Read_ADC_Channel(JS_RY_CHANNEL);
@@ -449,7 +450,7 @@ int main(void)
                   if(next_x >= TOTAL_COLS) next_x = 0;
                   if (!Tetromino_CheckCollision(next_x, pivot_y)) pivot_x = next_x;
 
-                  // Drop
+                  // Y Movement (Drop)
                   if (val_y > JS_HIGH) {
                       if (!Tetromino_CheckCollision(pivot_x, pivot_y + 1)) {
                           pivot_y++;
@@ -458,7 +459,6 @@ int main(void)
                   }
                   last_input_time = now;
               }
-
               // Anti-Clockwise Rotation
               static uint8_t antirot_latch = 0;
               if (HAL_GPIO_ReadPin(BTN_PORT, BTN_ANTIROT_PIN) == GPIO_PIN_SET) {
@@ -469,7 +469,6 @@ int main(void)
               } else {
             	  antirot_latch = 0;
               }
-
               // Clockwise Rotation
               static uint8_t rot_latch = 0;
               if (HAL_GPIO_ReadPin(BTN_PORT, BTN_ROT_PIN) == GPIO_PIN_RESET) {
@@ -480,7 +479,6 @@ int main(void)
               } else {
             	  rot_latch = 0;
               }
-
               // LED Matrix Render
               memcpy(display_buffer, locked_buffer, sizeof(locked_buffer));
               Tetromino_Draw(display_buffer);
@@ -517,14 +515,25 @@ int main(void)
 
           case STATE_STOPPED:
           {
-        	  // Clears the display
         	  MAX7219_Clear(display_buffer);
         	  MAX7219_Flush();
 
-              while(1){
-            	  // Does nothing
-            	  // Waits for the manual Reset to go back to STATE_INIT
-            	  // Hardware Reset = Black button on the STM board
+              static uint8_t restart_ok = 0;
+
+              if (HAL_GPIO_ReadPin(BTN_PORT, BTN_ANTIROT_PIN) == GPIO_PIN_RESET &&
+              HAL_GPIO_ReadPin(BTN_PORT, BTN_ROT_PIN) == GPIO_PIN_SET) {
+            	  restart_ok = 1;
+              }
+              if (restart_ok) {
+            	  if (HAL_GPIO_ReadPin(BTN_PORT, BTN_ANTIROT_PIN) == GPIO_PIN_SET ||
+            	  HAL_GPIO_ReadPin(BTN_PORT, BTN_ROT_PIN) == GPIO_PIN_RESET) {
+
+            		  uint32_t tick = HAL_GetTick();
+            		  while((HAL_GetTick() - tick) < DEBOUNCE_DELAY);
+
+            		  restart_ok = 0;
+            		  current_state = STATE_INIT;
+            	  }
               }
               break;
           }
@@ -537,7 +546,6 @@ int main(void)
 
               if (now - last_frame_time > 100) {
             	  const uint8_t* current_icon = (frame_index) ? GAMEOVER_ICON_2 : GAMEOVER_ICON_1;
-
                   memcpy(&display_buffer[0], current_icon, 8);
                   memcpy(&display_buffer[8], current_icon, 8);
                   MAX7219_Flush();
@@ -549,7 +557,6 @@ int main(void)
               HAL_GPIO_ReadPin(BTN_PORT, BTN_ROT_PIN) == GPIO_PIN_SET) {
             	  restart_ok = 1;
               }
-
               if (restart_ok) {
             	  if (HAL_GPIO_ReadPin(BTN_PORT, BTN_ANTIROT_PIN) == GPIO_PIN_SET ||
             	  HAL_GPIO_ReadPin(BTN_PORT, BTN_ROT_PIN) == GPIO_PIN_RESET) {

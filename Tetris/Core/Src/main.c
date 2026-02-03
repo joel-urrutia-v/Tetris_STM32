@@ -427,7 +427,7 @@ int main(void)
           {
               // Gravity Logic
               if (now - last_gravity_time > gravity_speed) {
-            	  uint8_t collision = Tetromino_CheckCollision(pivot_x, pivot_y);
+            	  uint8_t collision = Tetromino_CheckCollision(pivot_x, pivot_y+1);
             	  if (collision) {
                 	  // Lock Piece
                 	  Tetromino_Lock();
@@ -547,6 +547,7 @@ int main(void)
           case STATE_GAMEOVER:
           {
               // GameOver Animation
+        	  Audio_Beep(100);
               uint8_t frame_index = (now >> 9) & 1;
               static uint32_t last_frame_time = 0;
 
@@ -819,6 +820,7 @@ void Tetromino_Rotate(int8_t direction) {
 }
 
 /* LCD FUNCTIONS */
+
 void LCD_Send4Bits(uint8_t val) {
     HAL_GPIO_WritePin(LCD_PORT, D4_PIN, (val >> 0) & 0x01);
     HAL_GPIO_WritePin(LCD_PORT, D5_PIN, (val >> 1) & 0x01);
@@ -850,7 +852,7 @@ void LCD_SendData(uint8_t data) {
 }
 
 void LCD_Init(void) {
-    HAL_Delay(5);
+    HAL_Delay(50);
     HAL_GPIO_WritePin(LCD_PORT, RS_PIN, GPIO_PIN_RESET);
 
     LCD_Send4Bits(0x03); LCD_EnablePulse(); HAL_Delay(5);
@@ -858,11 +860,12 @@ void LCD_Init(void) {
     LCD_Send4Bits(0x03); LCD_EnablePulse(); HAL_Delay(1);
     LCD_Send4Bits(0x02); LCD_EnablePulse();
 
-    LCD_SendCommand(0x28);
-    LCD_SendCommand(0x0C);
-    LCD_SendCommand(0x06);
-    LCD_SendCommand(0x01);
-    HAL_Delay(1);
+    LCD_SendCommand(0x28); // 4-bit, 2 líneas, 5x8
+    LCD_SendCommand(0x08); // Display OFF
+    LCD_SendCommand(0x01); // Clear
+    HAL_Delay(2);
+    LCD_SendCommand(0x06); // Entry mode
+    LCD_SendCommand(0x0C); // Display ON
 }
 
 void LCD_LoadCustomChars(void) {
